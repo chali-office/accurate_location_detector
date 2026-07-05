@@ -61,27 +61,28 @@ button {
   opacity: 0.6;
 }
 
+/* Pulse via box-shadow spread, NOT a scaled pseudo-element.
+   Transformed elements contribute to the document's scrollable overflow,
+   which made scrollbars flicker in and out with every animation cycle
+   whenever a dot sat near a viewport edge. Box-shadows never affect
+   layout or scroll area, so this version can't cause that. */
 .pulse-dot {
   position: relative;
   width: 10px; height: 10px;
   border-radius: 50%;
   background: var(--signal);
   flex-shrink: 0;
+  animation: pulse-shadow 1.8s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
 }
-.pulse-dot::before {
-  content: '';
-  position: absolute;
-  inset: -8px;
-  border-radius: 50%;
-  border: 1.5px solid var(--signal);
-  animation: pulse-ring 1.8s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
+.pulse-dot.stale {
+  background: var(--alert);
+  animation: none;
 }
-.pulse-dot.stale { background: var(--alert); }
-.pulse-dot.stale::before { border-color: var(--alert); animation: none; opacity: 0; }
 
-@keyframes pulse-ring {
-  0% { transform: scale(0.5); opacity: 0.9; }
-  100% { transform: scale(2.4); opacity: 0; }
+@keyframes pulse-shadow {
+  0%   { box-shadow: 0 0 0 0 rgba(0, 217, 163, 0.55); }
+  70%  { box-shadow: 0 0 0 13px rgba(0, 217, 163, 0); }
+  100% { box-shadow: 0 0 0 13px rgba(0, 217, 163, 0); }
 }
 
 .status-row {
@@ -100,5 +101,5 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-dot::before { animation: none; }
+  .pulse-dot { animation: none; }
 }
