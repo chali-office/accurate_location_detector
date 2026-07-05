@@ -1,0 +1,15 @@
+{
+  "name": "live-tracker",
+  "version": "1.0.0",
+  "description": "Share a link, get a live arrow and distance pointing straight at the other person.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "nanoid": "^3.3.7",
+    "socket.io": "^4.7.5"
+  }
+}

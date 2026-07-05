@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Tracker — share a link, follow the dot</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .wrap { width: 100%; max-width: 480px; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 12px; color: var(--signal);
+    text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  h1 { font-size: 34px; margin: 0 0 8px; line-height: 1.1; }
+  .sub { color: var(--text-muted); margin: 0 0 32px; font-size: 15px; line-height: 1.5; }
+
+  .how {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; margin-bottom: 24px; font-size: 13.5px; color: var(--text-muted); line-height: 1.6;
+  }
+  .how strong { color: var(--text); }
+
+  .go {
+    width: 100%; padding: 16px; border: none; border-radius: var(--radius);
+    background: var(--signal); color: #05130F; font-family: var(--font-display); font-weight: 600;
+    font-size: 15px; transition: filter .15s;
+  }
+  .go:hover { filter: brightness(1.08); }
+  .go:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .result { display: none; margin-top: 28px; }
+  .result.show { display: block; }
+  .link-row { margin-bottom: 14px; }
+  .link-row label { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .link-box { display: flex; gap: 8px; }
+  .link-box input {
+    flex: 1; background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--text); font-family: var(--font-mono); font-size: 13px; padding: 12px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .link-box button {
+    background: var(--surface-raised); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--text); padding: 0 16px; font-size: 13px; font-family: var(--font-mono);
+  }
+  .link-box button:hover { border-color: var(--signal); color: var(--signal); }
+  .hint { color: var(--text-muted); font-size: 12.5px; margin-top: 18px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="rail"></div>
+<div class="wrap">
+  <div class="eyebrow"><span class="pulse-dot" style="position:static;"></span> live tracker</div>
+  <h1>Share a link.<br>Follow the dot.</h1>
+  <p class="sub">Create a tracking link. The person you send it to shows up live the moment they open it — no app, no sign-in.</p>
+
+  <div class="how">
+    <strong>How it works:</strong> both links share live GPS. The view link doesn't show a map — it shows a live arrow and a distance, pointing straight at the other phone. Point your phone flat and walk; the arrow updates as you get closer.
+  </div>
+
+  <button class="go" id="createBtn">Create tracking link</button>
+
+  <div class="result" id="result">
+    <div class="link-row">
+      <label>Send this to the person being tracked</label>
+      <div class="link-box">
+        <input type="text" id="trackLink" readonly>
+        <button data-copy="trackLink">Copy</button>
+      </div>
+    </div>
+    <div class="link-row">
+      <label>Keep this to watch their location</label>
+      <div class="link-box">
+        <input type="text" id="viewLink" readonly>
+        <button data-copy="viewLink">Copy</button>
+      </div>
+    </div>
+    <p class="hint">The tracking link starts sharing location the instant it's opened — no confirmation step. Only share it with the person you intend to track. Links expire after 24 hours.</p>
+  </div>
+</div>
+
+<script>
+  document.getElementById('createBtn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Creating…';
+    try {
+      const res = await fetch('/api/session', { method: 'POST' });
+      if (res.status === 429) { alert('Too many links created recently. Wait a bit and try again.'); return; }
+      const data = await res.json();
+      const origin = window.location.origin;
+      document.getElementById('trackLink').value = `${origin}/track/${data.trackToken}`;
+      document.getElementById('viewLink').value = `${origin}/view/${data.viewToken}`;
+      document.getElementById('result').classList.add('show');
+    } catch (err) {
+      alert('Could not create link. Try again.');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Create tracking link';
+    }
+  });
+
+  document.querySelectorAll('[data-copy]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById(btn.dataset.copy);
+      input.select();
+      navigator.clipboard.writeText(input.value);
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => btn.textContent = original, 1200);
+    });
+  });
+</script>
+</body>
+</html>

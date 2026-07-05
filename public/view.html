@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Find them · Live Tracker</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  header {
+    padding: 18px 22px; display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--line); flex-wrap: wrap; gap: 12px;
+  }
+  header h1 { font-size: 17px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  main {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 32px 24px; text-align: center;
+  }
+
+  .compass {
+    width: 240px; height: 240px; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--surface);
+    position: relative; margin-bottom: 32px; flex-shrink: 0;
+  }
+  .compass::before {
+    content: '';
+    position: absolute; inset: 20px; border-radius: 50%; border: 1px dashed var(--line);
+  }
+  .arrow-wrap {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    transition: transform 0.35s cubic-bezier(.2,.7,.3,1);
+  }
+  .arrow-wrap svg { width: 90px; height: 90px; }
+  .center-dot {
+    position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+    background: var(--text-muted); border-radius: 50%; transform: translate(-50%, -50%);
+  }
+  .compass.stale .arrow-wrap { opacity: 0.25; }
+
+  .distance { font-family: var(--font-display); font-size: 44px; font-weight: 700; margin: 0 0 4px; }
+  .distance-unit { font-size: 18px; color: var(--text-muted); font-weight: 500; margin-left: 4px; }
+  .guidance-text { color: var(--text-muted); font-size: 14px; max-width: 320px; line-height: 1.5; margin: 0 0 24px; }
+
+  .action-btn {
+    background: var(--signal); color: #05130F; border: none; border-radius: var(--radius);
+    padding: 14px 24px; font-family: var(--font-display); font-weight: 600; font-size: 14px;
+    margin-top: 8px;
+  }
+  .action-btn.secondary {
+    background: var(--surface); color: var(--text); border: 1px solid var(--line);
+  }
+
+  .empty h2 { font-size: 18px; margin: 0 0 8px; }
+  .empty p { color: var(--text-muted); font-size: 14px; max-width: 320px; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="pulse-dot" id="headerDot" style="position:static;"></span> Live view</h1>
+  <div class="status-row" id="statusRow">Connecting…</div>
+</header>
+
+<main>
+  <div id="emptyState" class="empty">
+    <h2>Waiting for a signal</h2>
+    <p>Nothing has come through yet. This updates the moment the tracking link is opened on the other end.</p>
+  </div>
+
+  <div id="finder" class="hidden">
+    <div class="compass" id="compass">
+      <div class="center-dot"></div>
+      <div class="arrow-wrap" id="arrowWrap">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M12 2 L19 21 L12 17 L5 21 Z" fill="#00D9A3" />
+        </svg>
+      </div>
+    </div>
+    <div>
+      <span class="distance" id="distanceValue">—</span><span class="distance-unit" id="distanceUnit"></span>
+    </div>
+    <p class="guidance-text" id="guidanceText">Getting your position…</p>
+    <button class="action-btn hidden" id="compassBtn">Enable compass</button>
+    <button class="action-btn secondary hidden" id="locationBtn">Enable my location</button>
+  </div>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const viewToken = window.location.pathname.split('/').pop();
+  const socket = io();
+  const statusRow = document.getElementById('statusRow');
+  const headerDot = document.getElementById('headerDot');
+  const emptyState = document.getElementById('emptyState');
+  const finder = document.getElementById('finder');
+  const compass = document.getElementById('compass');
+  const arrowWrap = document.getElementById('arrowWrap');
+  const distanceValue = document.getElementById('distanceValue');
+  const distanceUnit = document.getElementById('distanceUnit');
+  const guidanceText = document.getElementById('guidanceText');
+  const compassBtn = document.getElementById('compassBtn');
+  const locationBtn = document.getElementById('locationBtn');
+
+  let targetLoc = null;      // last smoothed target position
+  let targetHistory = [];    // recent raw fixes for smoothing
+  let targetReceivedAt = 0;  // LOCAL clock time we received the last update (skew-safe staleness)
+  let targetAccuracy = null;
+  let myLoc = null;
+  let myAccuracy = null;
+  let heading = null;
+  let headingAvailable = false;
+  let stopped = false;
+
+  function setStatus(text, stale) {
+    statusRow.textContent = text;
+    headerDot.classList.toggle('stale', !!stale);
+  }
+
+  function toRad(d) { return (d * Math.PI) / 180; }
+  function toDeg(r) { return (r * 180) / Math.PI; }
+
+  function distanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function bearingDegrees(lat1, lon1, lat2, lon2) {
+    const φ1 = toRad(lat1), φ2 = toRad(lat2), Δλ = toRad(lon2 - lon1);
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+
+  function toCardinal(deg) {
+    const dirs = ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'];
+    return dirs[Math.round(deg / 45) % 8];
+  }
+
+  function formatDistance(m) {
+    if (m < 1000) return { value: Math.round(m), unit: 'm' };
+    return { value: (m / 1000).toFixed(2), unit: 'km' };
+  }
+
+  // Average the last few fixes to damp GPS jitter — matters most under
+  // station roofs where raw fixes can jump 10m+ between readings.
+  function acceptTargetFix(loc) {
+    targetHistory.push(loc);
+    if (targetHistory.length > 3) targetHistory.shift();
+    const n = targetHistory.length;
+    targetLoc = {
+      lat: targetHistory.reduce((s, l) => s + l.lat, 0) / n,
+      lng: targetHistory.reduce((s, l) => s + l.lng, 0) / n,
+    };
+    targetAccuracy = loc.accuracy;
+    targetReceivedAt = Date.now();
+    stopped = false;
+  }
+
+  function combinedErrorMeters() {
+    return (targetAccuracy || 0) + (myAccuracy || 0);
+  }
+
+  function render() {
+    if (!targetLoc) return;
+    finder.classList.remove('hidden');
+    emptyState.classList.add('hidden');
+
+    const stale = Date.now() - targetReceivedAt > 15000;
+    compass.classList.toggle('stale', stale || stopped);
+
+    if (!myLoc) {
+      guidanceText.textContent = 'Waiting for your own location…';
+      return;
+    }
+
+    const dist = distanceMeters(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
+    const bearing = bearingDegrees(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
+    const { value, unit } = formatDistance(dist);
+    distanceValue.textContent = value;
+    distanceUnit.textContent = unit;
+
+    const err = combinedErrorMeters();
+    let text;
+    if (dist <= Math.max(err, 8)) {
+      // Within combined GPS error — pointing an arrow now is noise, not signal.
+      text = "You're basically there — look around.";
+      arrowWrap.style.opacity = 0.25;
+    } else {
+      arrowWrap.style.opacity = 1;
+      if (headingAvailable && heading !== null) {
+        const rotation = (bearing - heading + 360) % 360;
+        arrowWrap.style.transform = `rotate(${rotation}deg)`;
+        text = 'Follow the arrow.';
+      } else {
+        arrowWrap.style.transform = `rotate(${bearing}deg)`;
+        text = `Head ${toCardinal(bearing)} (compass not available — arrow is north-up).`;
+      }
+      if (err > 25) text += ` GPS is weak right now (±${Math.round(err)}m) — treat the arrow as a rough direction.`;
+    }
+    guidanceText.textContent = text;
+
+    if (stopped) setStatus('They stopped sharing', true);
+    else setStatus(stale ? 'signal stale — they may have lost reception' : 'live', stale);
+  }
+  setInterval(render, 3000); // refresh staleness even with no new events
+
+  fetch(`/api/session/view/${viewToken}`).then(r => {
+    if (!r.ok) throw new Error('not found');
+    return r.json();
+  }).then(state => {
+    socket.emit('join', viewToken);
+    if (state.location) {
+      acceptTargetFix(state.location);
+      // If the stored fix is old (relative to server clock), start in stale state.
+      if (state.now - state.location.ts > 15000) targetReceivedAt = Date.now() - (state.now - state.location.ts);
+      render();
+    }
+    startOwnLocation();
+    setupCompass();
+
+    socket.on('location:update', (loc) => {
+      acceptTargetFix(loc);
+      render();
+    });
+    socket.on('track:stopped', () => { stopped = true; render(); });
+  }).catch(() => {
+    setStatus('Link not found', true);
+    emptyState.querySelector('h2').textContent = 'Link not found';
+    emptyState.querySelector('p').textContent = 'This tracking link may have expired.';
+  });
+
+  function startOwnLocation() {
+    if (!('geolocation' in navigator)) {
+      guidanceText.textContent = "This browser can't get your location, so distance can't be calculated.";
+      return;
+    }
+    navigator.geolocation.watchPosition(
+      (pos) => {
+        myLoc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        myAccuracy = Math.round(pos.coords.accuracy);
+        locationBtn.classList.add('hidden');
+        render();
+      },
+      () => {
+        locationBtn.classList.remove('hidden');
+        guidanceText.textContent = 'Location permission needed to calculate distance and direction.';
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+    );
+  }
+  locationBtn.addEventListener('click', startOwnLocation);
+
+  function handleOrientation(event) {
+    let h = null;
+    if (typeof event.webkitCompassHeading === 'number') {
+      h = event.webkitCompassHeading;
+    } else if (event.absolute && event.alpha !== null) {
+      h = (360 - event.alpha) % 360;
+    }
+    if (h !== null) {
+      heading = h;
+      headingAvailable = true;
+      render();
+    }
+  }
+
+  function setupCompass() {
+    const needsPermission = typeof DeviceOrientationEvent !== 'undefined'
+      && typeof DeviceOrientationEvent.requestPermission === 'function';
+
+    if (needsPermission) {
+      compassBtn.classList.remove('hidden');
+      compassBtn.addEventListener('click', async () => {
+        try {
+          const result = await DeviceOrientationEvent.requestPermission();
+          if (result === 'granted') {
+            window.addEventListener('deviceorientation', handleOrientation);
+            compassBtn.classList.add('hidden');
+          }
+        } catch (e) {
+          guidanceText.textContent = 'Compass permission was denied. Showing north-up direction instead.';
+        }
+      });
+    } else if ('ondeviceorientationabsolute' in window) {
+      window.addEventListener('deviceorientationabsolute', handleOrientation);
+    } else if ('DeviceOrientationEvent' in window) {
+      window.addEventListener('deviceorientation', handleOrientation);
+    }
+  }
+</script>
+</body>
+</html>

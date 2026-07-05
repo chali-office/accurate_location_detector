@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sharing your location</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .wrap { width: 100%; max-width: 420px; text-align: center; }
+  .badge {
+    width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 24px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface); border: 1px solid var(--line); position: relative;
+  }
+  .badge .pulse-dot { width: 14px; height: 14px; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  .sub { color: var(--text-muted); font-size: 14px; margin: 0 0 32px; line-height: 1.5; }
+  .readout {
+    font-family: var(--font-mono); font-size: 13px; color: var(--text-muted);
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px; text-align: left; display: none;
+  }
+  .readout.show { display: block; }
+  .readout div { margin-bottom: 6px; }
+  .readout span { color: var(--text); }
+  .error {
+    display: none; color: var(--alert); font-size: 13.5px; margin-top: 20px;
+    background: var(--alert-dim); border: 1px solid var(--alert); border-radius: var(--radius); padding: 14px;
+  }
+  .error.show { display: block; }
+</style>
+</head>
+<body>
+<div class="rail"></div>
+<div class="wrap">
+  <div class="badge"><div class="pulse-dot" id="dot"></div></div>
+  <h1 id="title">Connecting…</h1>
+  <p class="sub" id="subtitle">Setting things up.</p>
+
+  <div class="readout" id="gpsReadout">
+    <div>LAT &nbsp;<span id="lat">—</span></div>
+    <div>LNG &nbsp;<span id="lng">—</span></div>
+    <div>ACCURACY &nbsp;<span id="acc">—</span></div>
+    <div>LAST SENT &nbsp;<span id="ts">—</span></div>
+  </div>
+
+  <div class="error" id="error"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const token = window.location.pathname.split('/').pop();
+  const socket = io();
+  const title = document.getElementById('title');
+  const subtitle = document.getElementById('subtitle');
+  const dot = document.getElementById('dot');
+  const errorBox = document.getElementById('error');
+  let wakeLock = null;
+
+  function showError(msg) {
+    errorBox.textContent = msg;
+    errorBox.classList.add('show');
+    dot.classList.add('stale');
+  }
+
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      }
+    } catch (e) { /* not fatal — user may just need to keep screen on manually */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !wakeLock) requestWakeLock();
+  });
+
+  fetch(`/api/session/track/${token}`).then(r => {
+    if (!r.ok) throw new Error('not found');
+    return r.json();
+  }).then(() => {
+    startGps();
+    requestWakeLock();
+  }).catch(() => {
+    title.textContent = 'Link not found';
+    subtitle.textContent = 'This tracking link may have expired.';
+    dot.classList.add('stale');
+  });
+
+  function startGps() {
+    document.getElementById('gpsReadout').classList.add('show');
+    if (!('geolocation' in navigator)) {
+      showError("This browser can't share location.");
+      return;
+    }
+    title.textContent = "You're sharing your location";
+    subtitle.textContent = 'Keep this screen on and this tab open — location sharing pauses if the phone locks. Close the tab any time to stop.';
+
+    navigator.geolocation.watchPosition(
+      (pos) => {
+        const location = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: Math.round(pos.coords.accuracy),
+        };
+        document.getElementById('lat').textContent = location.lat.toFixed(5);
+        document.getElementById('lng').textContent = location.lng.toFixed(5);
+        document.getElementById('acc').textContent = `±${location.accuracy}m`;
+        document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+        socket.emit('track:update', { token, location });
+        errorBox.classList.remove('show');
+        dot.classList.remove('stale');
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          showError('Location permission was denied, so nothing is being shared. Allow location access to start.');
+        } else {
+          showError('Could not get a location fix. Retrying…');
+        }
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+    );
+
+    window.addEventListener('pagehide', () => socket.emit('track:stopped', token));
+  }
+</script>
+</body>
+</html>
