@@ -84,7 +84,7 @@ app.post("/api/session", (req, res) => {
     viewToken,
     createdAt: Date.now(),
     lastUpdate: null,
-    location: null, // { lat, lng, accuracy, ts } — ts is SERVER time
+    location: null, // { lat, lng, accuracy, heading, speed, ts } — ts is SERVER time
     active: false,
   };
   viewIndex[viewToken] = trackToken;
@@ -109,10 +109,18 @@ app.get("/api/session/view/:token", (req, res) => {
 
 function validLocation(loc) {
   if (!loc || typeof loc !== "object") return false;
-  const { lat, lng, accuracy } = loc;
+  const { lat, lng, accuracy, heading, speed } = loc;
   if (typeof lat !== "number" || !Number.isFinite(lat) || lat < -90 || lat > 90) return false;
   if (typeof lng !== "number" || !Number.isFinite(lng) || lng < -180 || lng > 180) return false;
   if (typeof accuracy !== "number" || !Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100000) return false;
+  // heading/speed are optional (null when the device is stationary) but,
+  // when present, must be sane numbers.
+  if (heading !== null && heading !== undefined) {
+    if (typeof heading !== "number" || !Number.isFinite(heading) || heading < 0 || heading > 360) return false;
+  }
+  if (speed !== null && speed !== undefined) {
+    if (typeof speed !== "number" || !Number.isFinite(speed) || speed < 0 || speed > 200) return false;
+  }
   return true;
 }
 
@@ -144,6 +152,8 @@ io.on("connection", (socket) => {
       lat: location.lat,
       lng: location.lng,
       accuracy: Math.round(location.accuracy),
+      heading: typeof location.heading === "number" ? Math.round(location.heading * 10) / 10 : null,
+      speed: typeof location.speed === "number" ? Math.round(location.speed * 10) / 10 : null,
       ts: Date.now(),
     };
     s.location = clean;

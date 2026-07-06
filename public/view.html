@@ -21,7 +21,7 @@
   .compass {
     width: 240px; height: 240px; border-radius: 50%;
     border: 1px solid var(--line); background: var(--surface);
-    position: relative; margin-bottom: 32px; flex-shrink: 0;
+    position: relative; margin-bottom: 20px; flex-shrink: 0;
   }
   .compass::before {
     content: '';
@@ -29,7 +29,7 @@
   }
   .arrow-wrap {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    transition: transform 0.35s cubic-bezier(.2,.7,.3,1);
+    transition: transform 0.35s cubic-bezier(.2,.7,.3,1), opacity 0.3s;
   }
   .arrow-wrap svg { width: 90px; height: 90px; }
   .center-dot {
@@ -38,9 +38,28 @@
   }
   .compass.stale .arrow-wrap { opacity: 0.25; }
 
+  .track-chip {
+    display: none; align-items: center; gap: 6px; margin: 0 auto 16px;
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+    color: var(--signal); border: 1px solid var(--signal); border-radius: 999px;
+    padding: 4px 12px; width: fit-content; text-transform: uppercase;
+  }
+  .track-chip.show { display: flex; }
+
   .distance { font-family: var(--font-display); font-size: 44px; font-weight: 700; margin: 0 0 4px; }
   .distance-unit { font-size: 18px; color: var(--text-muted); font-weight: 500; margin-left: 4px; }
-  .guidance-text { color: var(--text-muted); font-size: 14px; max-width: 320px; line-height: 1.5; margin: 0 0 24px; }
+  .guidance-text { color: var(--text-muted); font-size: 14px; max-width: 340px; line-height: 1.5; margin: 0 0 12px; }
+
+  .device-warning {
+    display: none; max-width: 340px; margin: 0 0 12px;
+    background: var(--alert-dim); border: 1px solid var(--alert); border-radius: var(--radius);
+    color: var(--alert); font-size: 13px; line-height: 1.5; padding: 12px 14px;
+  }
+  .device-warning.show { display: block; }
+
+  .accuracy-row {
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); margin: 0 0 20px;
+  }
 
   .action-btn {
     background: var(--signal); color: #05130F; border: none; border-radius: var(--radius);
@@ -78,10 +97,13 @@
         </svg>
       </div>
     </div>
+    <div class="track-chip" id="trackChip">track lock — distance is along the platform</div>
     <div>
       <span class="distance" id="distanceValue">—</span><span class="distance-unit" id="distanceUnit"></span>
     </div>
+    <div class="device-warning" id="deviceWarning"></div>
     <p class="guidance-text" id="guidanceText">Getting your position…</p>
+    <p class="accuracy-row" id="accuracyRow"></p>
     <button class="action-btn hidden" id="compassBtn">Enable compass</button>
     <button class="action-btn secondary hidden" id="locationBtn">Enable my location</button>
   </div>
@@ -97,21 +119,40 @@
   const finder = document.getElementById('finder');
   const compass = document.getElementById('compass');
   const arrowWrap = document.getElementById('arrowWrap');
+  const trackChip = document.getElementById('trackChip');
   const distanceValue = document.getElementById('distanceValue');
   const distanceUnit = document.getElementById('distanceUnit');
   const guidanceText = document.getElementById('guidanceText');
+  const deviceWarning = document.getElementById('deviceWarning');
+  const accuracyRow = document.getElementById('accuracyRow');
   const compassBtn = document.getElementById('compassBtn');
   const locationBtn = document.getElementById('locationBtn');
 
-  let targetLoc = null;      // last smoothed target position
-  let targetHistory = [];    // recent raw fixes for smoothing
-  let targetReceivedAt = 0;  // LOCAL clock time we received the last update (skew-safe staleness)
+  // Own-accuracy above this = IP-based fix (no GPS on this device).
+  const NO_GPS_THRESHOLD_M = 2000;
+  // Realistic phone-to-phone GPS offset floor; a compartment is ~20m.
+  const ARRIVAL_FLOOR_M = 15;
+  // Along-track error is smaller (cross-track noise discarded), so with a
+  // track lock we can call arrival a little tighter.
+  const ARRIVAL_FLOOR_1D_M = 10;
+  const ARRIVAL_CAP_M = 40;
+  // Heading samples only count while the train is genuinely moving.
+  const MIN_SPEED_MS = 2.5;
+
+  let targetLoc = null;
+  let targetHistory = [];   // recent fixes for position smoothing
+  let targetTrail = [];     // longer trail for track-axis estimation
+  let targetReceivedAt = 0;
   let targetAccuracy = null;
   let myLoc = null;
   let myAccuracy = null;
   let heading = null;
   let headingAvailable = false;
   let stopped = false;
+
+  // The learned track axis, degrees in [0, 180). Once locked it is kept —
+  // the track doesn't move — but keeps refining while fresh headings arrive.
+  let trackAxis = null;
 
   function setStatus(text, stale) {
     statusRow.textContent = text;
@@ -136,6 +177,14 @@
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
+  // Local flat-earth offsets in metres from A to B: dx east, dy north.
+  // Fine at these scales (city-block distances).
+  function localOffset(latA, lngA, latB, lngB) {
+    const mPerDegLat = 110540;
+    const mPerDegLng = 111320 * Math.cos(toRad(latA));
+    return { dx: (lngB - lngA) * mPerDegLng, dy: (latB - latA) * mPerDegLat };
+  }
+
   function toCardinal(deg) {
     const dirs = ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'];
     return dirs[Math.round(deg / 45) % 8];
@@ -146,8 +195,60 @@
     return { value: (m / 1000).toFixed(2), unit: 'km' };
   }
 
-  // Average the last few fixes to damp GPS jitter — matters most under
-  // station roofs where raw fixes can jump 10m+ between readings.
+  function formatAccuracy(m) {
+    if (m == null) return '—';
+    if (m >= 1000) return `±${(m / 1000).toFixed(1)}km`;
+    return `±${Math.round(m)}m`;
+  }
+
+  // Mean of angles that represent an AXIS (θ and θ+180 are the same line):
+  // classic double-angle trick, result in [0, 180).
+  function circularMeanAxis(degrees) {
+    let s = 0, c = 0;
+    for (const d of degrees) {
+      s += Math.sin(toRad(2 * d));
+      c += Math.cos(toRad(2 * d));
+    }
+    return ((toDeg(Math.atan2(s, c)) / 2) + 360) % 180;
+  }
+
+  // Estimate the track axis. Preferred source: GPS headings reported while
+  // the train is moving (very accurate at speed). Fallback: principal axis
+  // of the position trail once it spans enough ground.
+  function updateTrackAxis() {
+    const headings = targetTrail
+      .filter((f) => f.heading !== null && f.speed !== null && f.speed >= MIN_SPEED_MS)
+      .slice(-12)
+      .map((f) => f.heading);
+    if (headings.length >= 3) {
+      trackAxis = circularMeanAxis(headings);
+      return;
+    }
+    if (trackAxis !== null) return; // keep a previously learned axis
+    if (targetTrail.length < 6) return;
+
+    // PCA fallback over the trail, only if it spans >= 40m of ground.
+    const ref = targetTrail[0];
+    const pts = targetTrail.map((f) => localOffset(ref.lat, ref.lng, f.lat, f.lng));
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      minX = Math.min(minX, p.dx); maxX = Math.max(maxX, p.dx);
+      minY = Math.min(minY, p.dy); maxY = Math.max(maxY, p.dy);
+    }
+    if (Math.hypot(maxX - minX, maxY - minY) < 40) return;
+
+    const n = pts.length;
+    const mx = pts.reduce((s, p) => s + p.dx, 0) / n;
+    const my = pts.reduce((s, p) => s + p.dy, 0) / n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (const p of pts) {
+      const x = p.dx - mx, y = p.dy - my;
+      sxx += x * x; syy += y * y; sxy += x * y;
+    }
+    const phi = 0.5 * Math.atan2(2 * sxy, sxx - syy); // angle from east axis, CCW
+    trackAxis = ((90 - toDeg(phi)) % 180 + 180) % 180; // convert to compass axis
+  }
+
   function acceptTargetFix(loc) {
     targetHistory.push(loc);
     if (targetHistory.length > 3) targetHistory.shift();
@@ -159,10 +260,14 @@
     targetAccuracy = loc.accuracy;
     targetReceivedAt = Date.now();
     stopped = false;
-  }
 
-  function combinedErrorMeters() {
-    return (targetAccuracy || 0) + (myAccuracy || 0);
+    targetTrail.push({
+      lat: loc.lat, lng: loc.lng,
+      heading: (typeof loc.heading === 'number') ? loc.heading : null,
+      speed: (typeof loc.speed === 'number') ? loc.speed : null,
+    });
+    if (targetTrail.length > 40) targetTrail.shift();
+    updateTrackAxis();
   }
 
   function render() {
@@ -178,36 +283,68 @@
       return;
     }
 
-    const dist = distanceMeters(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
-    const bearing = bearingDegrees(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
-    const { value, unit } = formatDistance(dist);
+    if (myAccuracy !== null && myAccuracy > NO_GPS_THRESHOLD_M) {
+      deviceWarning.textContent = `This device is reporting its position to only ${formatAccuracy(myAccuracy)} — it likely has no GPS (desktop/laptop use network-based location). The distance and arrow can't be trusted here. Open this link on a phone to navigate.`;
+      deviceWarning.classList.add('show');
+      arrowWrap.style.opacity = 0.25;
+      guidanceText.textContent = 'Their live position is still being received correctly.';
+      setStatus(stopped ? 'They stopped sharing' : (stale ? 'signal stale' : 'live'), stale || stopped);
+      return;
+    }
+    deviceWarning.classList.remove('show');
+
+    const rawBearing = bearingDegrees(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
+    const rawDist = distanceMeters(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
+
+    // With a track axis, collapse the problem to one dimension: project the
+    // offset onto the axis, discard the cross-track (mostly noise) component.
+    let dispDist = rawDist;
+    let useBearing = rawBearing;
+    let oneD = false;
+    if (trackAxis !== null) {
+      const { dx, dy } = localOffset(myLoc.lat, myLoc.lng, targetLoc.lat, targetLoc.lng);
+      const az = toRad(trackAxis);
+      const along = dx * Math.sin(az) + dy * Math.cos(az); // signed metres along axis
+      dispDist = Math.abs(along);
+      useBearing = along >= 0 ? trackAxis : (trackAxis + 180) % 360;
+      oneD = true;
+    }
+    trackChip.classList.toggle('show', oneD);
+
+    const { value, unit } = formatDistance(dispDist);
     distanceValue.textContent = value;
     distanceUnit.textContent = unit;
+    accuracyRow.textContent =
+      `their gps ${formatAccuracy(targetAccuracy)} · your gps ${formatAccuracy(myAccuracy)}` +
+      (oneD ? ` · raw 2D ${Math.round(rawDist)}m` : '');
 
-    const err = combinedErrorMeters();
+    const err = (targetAccuracy || 0) + (myAccuracy || 0);
+    const floor = oneD ? ARRIVAL_FLOOR_1D_M : ARRIVAL_FLOOR_M;
+    const arrivalRadius = Math.min(Math.max(err, floor), ARRIVAL_CAP_M);
     let text;
-    if (dist <= Math.max(err, 8)) {
-      // Within combined GPS error — pointing an arrow now is noise, not signal.
+    if (dispDist <= arrivalRadius) {
       text = "You're basically there — look around.";
       arrowWrap.style.opacity = 0.25;
     } else {
       arrowWrap.style.opacity = 1;
+      const walkVerb = oneD ? `Walk ${toCardinal(useBearing)} along the platform.` : null;
       if (headingAvailable && heading !== null) {
-        const rotation = (bearing - heading + 360) % 360;
+        const rotation = (useBearing - heading + 360) % 360;
         arrowWrap.style.transform = `rotate(${rotation}deg)`;
-        text = 'Follow the arrow.';
+        text = walkVerb || 'Follow the arrow.';
       } else {
-        arrowWrap.style.transform = `rotate(${bearing}deg)`;
-        text = `Head ${toCardinal(bearing)} (compass not available — arrow is north-up).`;
+        arrowWrap.style.transform = `rotate(${useBearing}deg)`;
+        text = walkVerb || `Head ${toCardinal(useBearing)}.`;
+        text += ' (compass not available — arrow is north-up)';
       }
-      if (err > 25) text += ` GPS is weak right now (±${Math.round(err)}m) — treat the arrow as a rough direction.`;
+      if (err > 25) text += ` GPS is weak right now (±${Math.round(err)}m) — treat this as a rough direction.`;
     }
     guidanceText.textContent = text;
 
     if (stopped) setStatus('They stopped sharing', true);
     else setStatus(stale ? 'signal stale — they may have lost reception' : 'live', stale);
   }
-  setInterval(render, 3000); // refresh staleness even with no new events
+  setInterval(render, 3000);
 
   fetch(`/api/session/view/${viewToken}`).then(r => {
     if (!r.ok) throw new Error('not found');
@@ -216,7 +353,6 @@
     socket.emit('join', viewToken);
     if (state.location) {
       acceptTargetFix(state.location);
-      // If the stored fix is old (relative to server clock), start in stale state.
       if (state.now - state.location.ts > 15000) targetReceivedAt = Date.now() - (state.now - state.location.ts);
       render();
     }
